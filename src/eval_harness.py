@@ -222,6 +222,59 @@ PARSERS = {
 
 
 # ----------------------------------------------------------------------
+# Exploratory, added Phase 4. NOT preregistered. See DEVIATIONS.md.
+#
+# The 50-image pilot showed MedGemma states its answer plainly and then
+# enumerates the remaining classes in order to reject them. The frozen
+# lenient rule sees several distinct classes and returns UNPARSEABLE, so a
+# response a human reads without difficulty scores as a parse failure.
+#
+# A2b measures what the model communicated rather than whether it avoided
+# listing alternatives. The frozen definitions in D4 are untouched.
+# ----------------------------------------------------------------------
+
+_BOLD = re.compile(r"\*\*(.+?)\*\*", re.DOTALL)
+
+
+def extract_answer_span(output: str) -> str:
+    """Isolate the span where the model states its conclusion.
+
+    Rule 1: the first markdown bold span. The enumerated bullets are also
+    bold, but they follow the answer sentence, so the first one is the
+    model's own stated conclusion.
+
+    Rule 2: no bold present, fall back to the first non-empty line.
+
+    Fixed before this function was ever scored, so it cannot be tuned to
+    flatter the result.
+    """
+    match = _BOLD.search(output)
+    if match:
+        return match.group(1)
+    for line in output.splitlines():
+        if line.strip():
+            return line
+    return ""
+
+
+def parse_extracted(output: str, dataset: str) -> int:
+    """Lenient matching applied to the extracted answer span only.
+
+    Same alias table and same ambiguity rule as parse_lenient. The only
+    difference is how much of the response is considered.
+    """
+    span = extract_answer_span(output)
+    if not span.strip():
+        return UNPARSEABLE
+    return parse_lenient(span, dataset)
+
+
+EXPLORATORY_PARSERS = {
+    "extracted": parse_extracted,
+}
+
+
+# ----------------------------------------------------------------------
 # Metrics
 # ----------------------------------------------------------------------
 
