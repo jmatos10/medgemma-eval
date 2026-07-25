@@ -248,3 +248,203 @@ the model would appear worse than a constant predictor. A constant predictor
 scores 0.115 macro-F1 against A2b's 0.365, with non-zero F1 on all seven
 classes. Section D2 fixed macro-F1 as primary before any result existed, and
 this is the case it was fixed for.
+
+---
+
+## D-007. Result: H1 fails on BloodMNIST validation
+
+**Date:** 2026-07-25
+**Status:** Preregistered result, reported per section G. Validation only.
+
+Full BloodMNIST validation, 1,712 images, MedGemma 1.5 4B zero-shot, greedy
+decoding, cap 512.
+
+| Arm | Macro-F1 | 95% CI | Accuracy | Unparseable |
+|---|---|---|---|---|
+| A1 strict | 0.000 | [0.000, 0.000] | 0.000 | 100.0% |
+| A2 lenient | 0.038 | [0.034, 0.043] | 0.157 | 4.8% |
+| A2b extraction | 0.037 | [0.033, 0.043] | 0.160 | 0.0% |
+
+A2b minus A1: +0.037, 95% CI [+0.033, +0.043].
+
+H1 predicted at least +0.10 macro-F1 on **both** datasets. BloodMNIST returns
++0.037. **H1 is falsified on this dataset.**
+
+### Why the recovery is small
+
+The model predicted class 3, immature granulocytes, for 1,669 of 1,712
+images (97.5 percent). Six of eight classes score exactly zero F1. A constant
+predictor emitting class 3 scores approximately 0.033 macro-F1 against
+A2b's 0.037.
+
+There is no latent capability for better parsing to recover. Format handling
+cannot rescue a model that answers the same class regardless of input.
+
+Generated text shows the model producing a plausible morphological
+description of what it was shown, then concluding immature granulocyte
+anyway. Example, an erythroblast: it described a large dark purple nucleus
+with scant cytoplasm, which is accurate, and answered class 3.
+
+### Interpretation
+
+H1 holds where the model has competence (DermaMNIST, +0.365) and fails where
+it does not (BloodMNIST, +0.037). The corrected claim is narrower and
+sharper than the original: format artifacts inflate measured error only when
+there is real capability being obscured. They cannot manufacture capability
+that is absent.
+
+Reported per section G. Arms are not dropped for failing.
+
+### Secondary: the A2 enumeration risk did not generalize
+
+D-001 flagged that extraction was validated only on DermaMNIST and had to be
+re-checked elsewhere. It has been.
+
+Lenient parsing left 4.8 percent unparseable on BloodMNIST against 92.4
+percent on DermaMNIST. The enumerate-and-reject behavior that broke A2 is
+dermatology-specific under this prompt. A2 and A2b are statistically
+indistinguishable here (0.038 against 0.037), which is the correct behavior
+for an exploratory arm: it adds nothing when there is nothing to add.
+
+---
+
+## D-008. Result: A3 on DermaMNIST, and the prespecified primary underperforms
+
+**Date:** 2026-07-25
+**Status:** Preregistered result. Validation only.
+
+Full DermaMNIST validation, 1,003 images, constrained decoding over the
+label set. No text generated, so parse failure is impossible.
+
+| Variant | Macro-F1 | 95% CI | Accuracy | Status |
+|---|---|---|---|---|
+| mean log-prob per token | 0.198 | [0.176, 0.220] | 0.529 | **primary, prespecified** |
+| raw log-prob sum | 0.334 | [0.279, 0.377] | 0.596 | robustness |
+| PMI | 0.369 | [0.309, 0.425] | 0.610 | robustness |
+
+A1 scores 0.000 with a CI of [0.000, 0.000], so the A3 minus A1 difference
+equals A3's own value: **+0.198, 95% CI [0.176, 0.220]**, excluding zero.
+
+H1 predicted at least +0.10 on this dataset. It holds.
+
+### The primary is the worst of the three
+
+Mean log-probability underperforms PMI by 17 points of macro-F1. The
+prespecification in the Phase 4 spec fixed `mean` as primary before any
+image was scored, on the theoretical argument that dividing by token count
+cancels the length penalty.
+
+That argument was incomplete. Long labels with internally predictable
+continuations carry per-token log-probabilities near zero, which inflates
+their average. Dividing by length does not cancel the length effect on such
+labels, it can invert it.
+
+Had the primary been left open, PMI at 0.369 could have been reported as the
+headline with `mean` described as an alternative also considered. No reader
+could have detected the substitution. That option did not exist because the
+choice was committed in advance.
+
+All three are reported, primary first, and the primary's underperformance is
+stated rather than buried.
+
+### Normalization changes the answer 55 percent of the time
+
+The three scorings agree on 454 of 1,003 images. The 50-image pilot showed
+agreement on 20 of 50, a similar rate at a much smaller sample.
+
+This belongs in limitations. A constrained-decoding result on this task is
+substantially a function of the normalization chosen, and papers reporting a
+single constrained-decoding number without stating which normalization was
+used, and whether it was chosen in advance, are underspecified.
+
+### Convergent estimates
+
+PMI at 0.369 and A2b extraction at 0.365 agree within noise despite sharing
+no machinery: one scores candidate labels without generating, the other
+reads generated text. Together with the pilot, three independent estimates
+cluster near 0.36 for MedGemma 1.5 zero-shot capability on DermaMNIST.
+
+---
+
+## D-009. Phase 4 close: H1 verdict on both datasets
+
+**Date:** 2026-07-25
+**Status:** Preregistered result. Validation split only. Test untouched.
+
+All six zero-shot treatments, both datasets, full validation splits.
+MedGemma 1.5 4B, revision `91850547`, greedy decoding, cap 512, seed 42.
+
+| Arm | Treatment | DermaMNIST (n=1,003) | BloodMNIST (n=1,712) |
+|---|---|---|---|
+| A1 | strict parsing | 0.000 | 0.000 |
+| A2 | lenient parsing | 0.137 | 0.038 |
+| A2b | extraction (exploratory) | 0.365 | 0.037 |
+| **A3** | **constrained, mean logp (primary)** | **0.198** | **0.036** |
+| A3-sum | constrained, raw sum | 0.334 | 0.021 |
+| A3-pmi | constrained, PMI | 0.369 | 0.019 |
+| | majority-class baseline | 0.115 | 0.041 |
+
+Macro-F1. Confidence intervals in D-006 through D-008.
+
+### H1 verdict
+
+H1 predicted at least +0.10 macro-F1 from constrained decoding over strict
+parsing, and above 20 percent unparseable under strict, **on both datasets**.
+
+| | Unparseable under A1 | A3 minus A1 | Verdict |
+|---|---|---|---|
+| DermaMNIST | 100% | +0.198 [0.176, 0.220] | **holds** |
+| BloodMNIST | 100% | +0.036 [0.033, 0.039] | **falsified** |
+
+The unparseable clause holds everywhere and by a wide margin. MedGemma
+produced a bare canonical label zero times in 2,715 attempts across both
+datasets. The magnitude clause holds on one dataset and fails on the other.
+
+**Revised claim, stated for the writeup:** format artifacts inflate measured
+error only where genuine capability is being obscured. They cannot
+manufacture capability that is absent. H1 as written did not distinguish
+these cases, and should have.
+
+### BloodMNIST is degenerate under every treatment
+
+No arm exceeds the 0.041 majority baseline. A3 under the primary
+normalization predicts class 3 for all 1,712 images, which makes it a
+constant predictor by construction: its 0.036 is arithmetically identical to
+what always answering class 3 would score.
+
+### Normalization sensitivity scales inversely with signal
+
+Agreement among the three A3 scorings:
+
+| Dataset | Agreement | Model has signal? |
+|---|---|---|
+| DermaMNIST | 454/1,003 (45%) | yes |
+| BloodMNIST | 5/1,712 (0.3%) | no |
+
+Where the image carries information, the normalizations mostly agree and
+differ at the margin. Where it does not, the normalization produces the
+ranking entirely, and the three variants select three different constants.
+Near-total disagreement among normalizations is therefore a usable signal
+that a constrained-decoding result is measuring label token statistics
+rather than the image.
+
+### Convergent estimates on DermaMNIST
+
+Three methods sharing no machinery: A2b extraction 0.365, A3-pmi 0.369, and
+the 50-image pilot 0.200 under mean normalization matching the full-split
+0.198. The clustering near 0.36 for the two strongest methods supports
+treating that as MedGemma's real zero-shot ceiling here, against a 0.115
+baseline.
+
+### Cost
+
+Phase 4 consumed approximately 3.1 GPU-hours, about $3.40. Four full passes
+plus pilots. Running total for the project is roughly $11.
+
+### What this sets up
+
+H2 and H3 concern the fine-tuned gap between MedGemma and Gemma 3, which
+Phase 4 does not address. One thing is now known that bears on H3: MedGemma's
+zero-shot advantage on the in-domain modality (DermaMNIST) over the
+out-of-domain one (BloodMNIST) is large before any fine-tuning. Whether that
+gap survives LoRA on both models is the actual test.
