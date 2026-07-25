@@ -157,17 +157,24 @@ def score_candidates(model, processor, prompt: str, image, label_token_ids):
 
     out = model(**batch)
 
-    # float32 for numerical stability. bf16 log_softmax loses precision.
-    logits = out.logits.float()
-    logprobs = F.log_softmax(logits, dim=-1)
+    # Only the positions that predict label tokens matter. Running
+    # log_softmax across the whole sequence materializes a float32 tensor of
+    # shape [candidates, sequence, vocabulary]. Gemma's vocabulary is about
+    # 262k, so at 7 candidates and 300 positions that is over 2 GB for a
+    # single image, and every position outside the label span is discarded
+    # immediately afterward.
+    #
+    # Position p predicts the token at p+1, so the span that predicts the
+    # label starts at prompt_len - 1.
+    start = prompt_len - 1
+    sliced = out.logits[:, start:start + max_len, :].float()
+    logprobs = F.log_softmax(sliced, dim=-1)
 
     sums = []
     for k, ids in enumerate(label_token_ids):
         total = 0.0
         for i, tok in enumerate(ids):
-            # the logit at position p predicts the token at position p+1
-            pos = prompt_len + i - 1
-            total += float(logprobs[k, pos, tok])
+            total += float(logprobs[k, i, tok])
         sums.append(total)
 
     return sums, lengths
@@ -179,6 +186,10 @@ def main() -> int:
     ap.add_argument("--split", default="val")
     ap.add_argument("--n", type=int, default=50, help="0 for the whole split")
     ap.add_argument("--model", default="google/medgemma-1.5-4b-it")
+    ap.add_argument("--tag", default="A3",
+                    help="output filename prefix, e.g. 'A3full' for a full run")
+    ap.add_argument("--resume", action="store_true",
+                    help="skip images already present in the output file")
     args = ap.parse_args()
 
     if args.model not in REVISIONS:
@@ -233,49 +244,72 @@ def main() -> int:
     )
     print("  done")
 
-    out_path = REPO / "results" / "raw" / f"A3_{args.dataset}_{args.split}.jsonl"
+    out_path = REPO / "results" / "raw" / f"{args.tag}_{args.dataset}_{args.split}.jsonl"
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    if out_path.exists():
+
+    # Resume support. Records append per image, so a killed run leaves a
+    # valid partial file. A hard kill can truncate the last line, so
+    # unparseable lines are skipped rather than treated as fatal.
+    done_indices = set()
+    if args.resume and out_path.exists():
+        with out_path.open() as fh:
+            for line in fh:
+                try:
+                    done_indices.add(json.loads(line)["image_index"])
+                except (json.JSONDecodeError, KeyError):
+                    pass
+        print(f"Resuming: {len(done_indices)} images already scored")
+    elif out_path.exists():
         out_path.unlink()
 
-    records = []
+    work = [
+        (i, im, t)
+        for i, im, t in zip(indices, images, truths)
+        if i not in done_indices
+    ]
+    print(f"{len(work)} images to score")
+
     t0 = time.time()
+    n_done = 0
 
-    for n_done, (idx, img, truth) in enumerate(zip(indices, images, truths), 1):
-        sums, lens = score_candidates(
-            model, processor, prompt, img, label_token_ids
-        )
-        means = [s / L for s, L in zip(sums, lens)]
-        pmis = [s - p for s, p in zip(sums, prior_sums)]
+    with out_path.open("a") as out_fh:
+        for idx, img, truth in work:
+            sums, lens = score_candidates(
+                model, processor, prompt, img, label_token_ids
+            )
+            means = [s / L for s, L in zip(sums, lens)]
+            pmis = [s - p for s, p in zip(sums, prior_sums)]
 
-        records.append({
-            "dataset": args.dataset,
-            "split": args.split,
-            "image_index": int(idx),
-            "true_label": int(truth),
-            "model": args.model,
-            "revision": revision,
-            "arm": "A3",
-            "logp_sum": sums,
-            "logp_mean": means,
-            "logp_pmi": pmis,
-            "token_counts": lens,
-            "pred_sum": int(np.argmax(sums)),
-            "pred_mean": int(np.argmax(means)),   # primary
-            "pred_pmi": int(np.argmax(pmis)),
-        })
+            out_fh.write(json.dumps({
+                "dataset": args.dataset,
+                "split": args.split,
+                "image_index": int(idx),
+                "true_label": int(truth),
+                "model": args.model,
+                "revision": revision,
+                "arm": "A3",
+                "logp_sum": sums,
+                "logp_mean": means,
+                "logp_pmi": pmis,
+                "token_counts": lens,
+                "pred_sum": int(np.argmax(sums)),
+                "pred_mean": int(np.argmax(means)),   # primary
+                "pred_pmi": int(np.argmax(pmis)),
+            }) + "\n")
+            n_done += 1
 
-        if n_done % 10 == 0 or n_done == len(images):
-            rate = (time.time() - t0) / n_done
-            print(f"  {n_done}/{len(images)}  {rate:.2f}s/image", end="\r",
-                  flush=True)
+            if n_done % 10 == 0 or n_done == len(work):
+                out_fh.flush()
+                rate = (time.time() - t0) / n_done
+                print(f"  {n_done}/{len(work)}  {rate:.2f}s/image", end="\r",
+                      flush=True)
 
     elapsed = time.time() - t0
     print()
 
-    with out_path.open("w") as fh:
-        for rec in records:
-            fh.write(json.dumps(rec) + "\n")
+    # Read back from disk so a resumed run reports on the whole split.
+    records = [json.loads(line) for line in out_path.open()]
+    print(f"{len(records)} total records in {out_path.name}")
 
     # ---------------- report ----------------
     from collections import Counter
