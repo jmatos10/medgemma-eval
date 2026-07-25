@@ -4,7 +4,7 @@
 
 **Author:** Juan A Matos Muñoz
 
-**Date registered:** [fill in on commit]
+**Date registered:** 2026-07-25 02:23 UTC (commit 41a958a)
 
 **Status:** Frozen at first commit. No edits after Phase 4 begins. Any change after that date goes in `DEVIATIONS.md` with a reason and a timestamp.
 
