@@ -175,3 +175,76 @@ that base rate during pretraining would over-predict nevi without reading
 the image carefully. That is consistent with threat F1 (contamination) and
 equally consistent with ordinary majority-class bias. This pilot cannot
 distinguish the two. Revisit when A4 and A5 are available.
+
+---
+
+## D-005. Correction to D-004: no majority-class collapse at full scale
+
+**Date:** 2026-07-25
+**Status:** Correction. Supersedes the collapse claim in D-004.
+
+D-004 reported majority-class collapse from the 50-image pilot: 36 of 50
+predictions were class 5 against a true count of 27.
+
+The full DermaMNIST validation split, 1,003 images, does not reproduce it.
+
+| | Pilot, n=50 | Full split, n=1,003 |
+|---|---|---|
+| Class 5 predicted | 36 | 662 |
+| Class 5 true | 27 | 671 |
+| Over-prediction | +33% | -1% |
+| Macro-F1 (A2b) | 0.200 | 0.365 |
+| Classes with F1 = 0 | 4 of 7 | 0 of 7 |
+
+The pilot draw contained 27 nevi out of 50, and two classes had no instances
+at all, so their F1 was zero by construction. The collapse was an artifact of
+the sample, not a property of the model.
+
+At full scale the model predicts nevi almost exactly as often as nevi occur,
+and posts non-zero F1 on all seven classes.
+
+**The D-004 open question about contamination is unaffected.** Calibrated
+base-rate matching is equally consistent with a model that learned HAM10000's
+prior and one that reads images competently. Nothing here separates them.
+Revisit when A4 and A5 are available.
+
+**Method note.** A 50-image pilot was adequate for its stated purpose,
+measuring output length to set the generation cap. It was not adequate for
+estimating per-class performance, and D-004 should have labeled the collapse
+claim as underpowered rather than as an observation. Recorded here so the
+same error is not repeated on BloodMNIST.
+
+---
+
+## D-006. Result: H1 confirmed on DermaMNIST validation
+
+**Date:** 2026-07-25
+**Status:** Preregistered result. Validation split only. Test remains untouched.
+
+Full DermaMNIST validation, 1,003 images, MedGemma 1.5 4B zero-shot, greedy
+decoding, cap 512, zero truncated.
+
+| Arm | Macro-F1 | 95% CI | Accuracy | Unparseable |
+|---|---|---|---|---|
+| A1 strict | 0.000 | [0.000, 0.000] | 0.000 | 100.0% |
+| A2 lenient | 0.137 | [0.080, 0.184] | 0.036 | 92.4% |
+| A2b extraction | 0.365 | [0.295, 0.432] | 0.643 | 0.0% |
+
+A2b minus A1 macro-F1: **+0.365**, 95% CI [+0.295, +0.432], excludes zero.
+
+H1 predicted at least +0.10 macro-F1 from constrained decoding over strict,
+and above 20 percent unparseable under strict. Measured: +0.365 and 100
+percent. The hypothesis holds by a wide margin.
+
+The model produced a bare canonical label zero times in 1,003 attempts.
+
+All three rows come from one generation pass. Identical weights, prompt,
+decoding, and output text. The only thing that differs is how the text is
+read.
+
+**Secondary observation, primary metric doing its job.** A2b accuracy of
+0.643 sits below the majority baseline of 0.669. Reported on accuracy alone
+the model would appear worse than a constant predictor. A constant predictor
+scores 0.115 macro-F1 against A2b's 0.365, with non-zero F1 on all seven
+classes. Section D2 fixed macro-F1 as primary before any result existed, and
+this is the case it was fixed for.

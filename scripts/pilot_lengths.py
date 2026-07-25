@@ -73,7 +73,8 @@ def load_split(dataset: str, split: str, n: int, seed: int = 42):
     ds = cls(split=split, size=224, download=False)
 
     rng = np.random.default_rng(seed)
-    idx = rng.choice(len(ds.imgs), size=min(n, len(ds.imgs)), replace=False)
+    k = len(ds.imgs) if n <= 0 else min(n, len(ds.imgs))
+    idx = rng.choice(len(ds.imgs), size=k, replace=False)
     idx.sort()
 
     images = [Image.fromarray(ds.imgs[i]) for i in idx]
@@ -85,10 +86,12 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--dataset", default="dermamnist", choices=list(CANONICAL))
     ap.add_argument("--split", default="val")
-    ap.add_argument("--n", type=int, default=50)
+    ap.add_argument("--n", type=int, default=50, help="0 for the whole split")
     ap.add_argument("--batch-size", type=int, default=4)
     ap.add_argument("--max-new-tokens", type=int, default=512)
     ap.add_argument("--model", default="google/medgemma-1.5-4b-it")
+    ap.add_argument("--tag", default="pilot",
+                    help="output filename prefix, e.g. 'gen' for a full run")
     args = ap.parse_args()
 
     if args.model not in REVISIONS:
@@ -106,7 +109,7 @@ def main() -> int:
 
     print(f"model     {args.model}")
     print(f"revision  {revision}")
-    print(f"dataset   {args.dataset} [{args.split}], n={args.n}")
+    print(f"dataset   {args.dataset} [{args.split}], n={args.n or 'all'}")
     print(f"cap       max_new_tokens={args.max_new_tokens} (deliberately high)")
     print()
 
@@ -136,7 +139,7 @@ def main() -> int:
     prompt = prompt_for(args.dataset)
     print(f"\n--- prompt ---\n{prompt}\n--------------\n")
 
-    out_path = REPO / "results" / "raw" / f"pilot_{args.dataset}_{args.split}.jsonl"
+    out_path = REPO / "results" / "raw" / f"{args.tag}_{args.dataset}_{args.split}.jsonl"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     if out_path.exists():
         out_path.unlink()
