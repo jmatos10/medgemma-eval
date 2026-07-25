@@ -1,0 +1,13 @@
+.medmnist/
+data/
+*.npz
+*.pt
+*.bin
+*.safetensors
+adapters/
+checkpoints/
+.ipynb_checkpoints/
+__pycache__/
+*.pyc
+.env
+*.key
