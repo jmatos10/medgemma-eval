@@ -129,7 +129,12 @@ def main() -> int:
     split = first["split"]
     y_true = [r["true_label"] for r in records]
 
-    kind = "generation" if "output_text" in first else "scoring"
+    if "output_text" in first:
+        kind = "generation"          # A1, A2, A2b share one generation pass
+    elif "pred_class" in first:
+        kind = "direct"              # A6, a classifier emits a class index
+    else:
+        kind = "scoring"             # A3 and its normalization variants
 
     print(f"file      {path.name}")
     print(f"kind      {kind}")
@@ -185,6 +190,16 @@ def main() -> int:
                   f"95% CI [{d['ci_low']:+.3f}, {d['ci_high']:+.3f}]")
             print(f"  excludes zero: {d['excludes_zero']}")
             print("  H1 predicted at least +0.10 from format handling alone.")
+    elif kind == "direct":
+        # A classifier produces a class index directly. No parsing, no
+        # normalization, no possibility of an unparseable answer. Routed
+        # through this script rather than scored inline so that A6 carries
+        # the same bootstrap intervals as every other arm in the table.
+        arm = first.get("arm", "A6")
+        y_pred = [r["pred_class"] for r in records]
+        report(arm, "direct classification", y_true, y_pred, dataset, meta,
+               True, args.n_boot, args.seed)
+        preds[arm] = y_pred
     else:
         for arm, key, label, primary in SCORING_ARMS:
             if key not in first:
