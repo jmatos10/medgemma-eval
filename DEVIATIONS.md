@@ -568,3 +568,100 @@ to write `"smoke_test": true` on any run using `--limit`, but the two
 existing records predate that field.
 
 **Analysis must filter Phase 5 training records to `n_train == 5000`.**
+
+---
+
+## D-011. Correction to D-010f: the smoke_test patch was never applied
+
+**Date:** 2026-07-26
+**Status:** Correction. Supersedes the patch claim in D-010f.
+
+D-010f states that `train_lora.py` "was subsequently patched to write
+`"smoke_test": true` on any run using `--limit`." That patch was written but
+never uploaded to the instance. The committed script does not contain it, and
+**none of the six Phase 5 training records carry the field.**
+
+Verified: `grep -c smoke_test scripts/train_lora.py` returns 0, and every
+record in `results.jsonl` with `stage == "train"` lacks the key.
+
+The patch is not being applied retroactively. The committed script is the one
+that produced all four adapters, and substituting a version that never ran
+would be worse than the missing field.
+
+**Operative rule is unchanged and now the only safeguard: analysis must
+filter Phase 5 training records to `n_train == 5000`.** Two records with
+`n_train == 64` are 64-example smoke tests from setup and are not arm A4.
+
+### Why this happened
+
+The deviation entry was written while the first training run was in flight,
+describing an intended change rather than a verified one. The upload was
+deferred and never completed.
+
+Entries asserting a code change should be written after the change is
+verified present, not before. The four result-bearing entries in this file
+(D-006 through D-009) were all written from pasted terminal output and are
+unaffected.
+
+---
+
+## D-012. Phase 5 complete: four adapters trained
+
+**Date:** 2026-07-26
+**Status:** Training complete. No evaluation yet. These are not results.
+
+| Arm | Model | Dataset | Train loss | Minutes |
+|---|---|---|---|---|
+| A4 | MedGemma 1.5 4B | DermaMNIST | 0.1360 | 38.1 |
+| A5 | Gemma 3 4B IT | DermaMNIST | 0.1666 | 38.2 |
+| A4 | MedGemma 1.5 4B | BloodMNIST | 0.1481 | 38.2 |
+| A5 | Gemma 3 4B IT | BloodMNIST | 0.1509 | 38.4 |
+
+Identical hyperparameters, identical 5,000-image subsample verified by hash,
+seed 42, vision encoder frozen, 29,802,496 trainable parameters (0.688
+percent) in all four runs. Wall clock within 0.3 minutes across all four, so
+both arms received equal compute on both datasets.
+
+Adapters are 114 MB each and are **not committed**. GitHub rejects files over
+100 MB, and they are reproducible from the committed subsample indices,
+hyperparameters, and seed. `adapters/` is in `.gitignore`.
+
+### Training-loss gap, a hint and not a test
+
+| Dataset | A4 | A5 | Gap favoring MedGemma |
+|---|---|---|---|
+| DermaMNIST (in-domain) | 0.1360 | 0.1666 | +0.0306 |
+| BloodMNIST (out-of-domain) | 0.1481 | 0.1509 | +0.0027 |
+
+The gap is roughly 11 times larger on the modality inside MedGemma's stated
+pretraining domains, which is the shape H3 predicts.
+
+**This is not evidence for H3.** H2 and H3 are stated on macro-F1 over a
+held-out split with a bootstrap confidence interval. Training loss is neither
+held out nor interval-bounded, and a lower training loss is equally
+consistent with better learning and with more memorization of those 5,000
+examples, which is precisely threat F1. Recorded because it was observed, and
+labeled so it cannot later be presented as confirmation.
+
+### Infrastructure: three mid-run instance shutdowns
+
+The A5 BloodMNIST run was killed three times before completing. Kernel logs
+from the failed boots show clean, graceful shutdowns: Docker containers
+stopped in order, filesystems unmounted, then SIGTERM. No GPU fault, no
+kernel OOM, no full disk.
+
+Diagnosis: **Workbench idle detection appears to track Jupyter kernel
+activity, not terminal activity or GPU utilization.** Runs launched with
+`nohup` from a terminal were stopped mid-training while the GPU sat at 100
+percent, and disabling the idle-shutdown setting did not prevent it. The run
+completed only when launched from a notebook cell, which keeps a kernel busy
+for the duration.
+
+Cost: roughly 30 minutes of GPU, about $0.55. Adapters save only on
+completion, so a killed run produces a 4 KB output directory that looks
+present in `ls` but contains no weights. Check for
+`adapter_model.safetensors` at roughly 114 MB, not for the directory.
+
+**Implication for Phase 7.** The test pass has longer runs. Either launch
+from a notebook cell, or add step-level checkpointing with
+`--resume-from-checkpoint` so a shutdown costs minutes rather than the run.
