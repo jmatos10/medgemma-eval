@@ -152,6 +152,8 @@ def main() -> int:
                          "every arm is complete.")
     ap.add_argument("--epochs", type=int, default=None,
                     help="override, for smoke tests only")
+    ap.add_argument("--eval-only", action="store_true",
+                    help="load the saved checkpoint and evaluate, no training")
     args = ap.parse_args()
 
     if args.epochs is not None:
@@ -166,6 +168,7 @@ def main() -> int:
     np.random.seed(HP["seed"])
 
     n_classes = len(CANONICAL[args.dataset])
+    ckpt_path = REPO / "checkpoints" / f"A6_{args.dataset}" / "resnet18.pt"
     print(f"arm       A6, ResNet-18")
     print(f"dataset   {args.dataset}, {n_classes} classes")
     print(f"eval on   {args.split}")
@@ -190,6 +193,21 @@ def main() -> int:
                              shuffle=False, num_workers=4, pin_memory=True)
 
     model = build_model(n_classes).to(device)
+
+    # Evaluating a saved checkpoint rather than training a new one. This is
+    # what lets the validation and test numbers come from the same model.
+    # Retraining per split would mean two different fitted models, and any
+    # difference between splits would confound generalization with
+    # run-to-run variance.
+    if args.eval_only:
+        if not ckpt_path.exists():
+            print(f"\nNo checkpoint at {ckpt_path.relative_to(REPO)}")
+            print("Train first: python scripts/train_resnet.py "
+                  f"--dataset {args.dataset}")
+            return 1
+        model.load_state_dict(torch.load(ckpt_path, map_location=device))
+        print(f"  loaded {ckpt_path.relative_to(REPO)}")
+        HP["epochs"] = 0
     total_params = sum(p.numel() for p in model.parameters())
     print(f"\n  parameters {total_params:,}")
     print(f"  versus 4,329,881,968 for the 4B arms, "
@@ -199,11 +217,16 @@ def main() -> int:
     optimizer = torch.optim.AdamW(model.parameters(),
                                   lr=HP["learning_rate"],
                                   weight_decay=HP["weight_decay"])
+    # T_max must be positive. In eval-only mode epochs is 0 and the
+    # scheduler is never stepped, so the value is irrelevant.
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=HP["epochs"]
+        optimizer, T_max=max(HP["epochs"], 1)
     )
 
-    print(f"\nTraining {HP['epochs']} epochs...")
+    if HP["epochs"]:
+        print(f"\nTraining {HP['epochs']} epochs...")
+    else:
+        print("\nEvaluating saved checkpoint, no training.")
     t0 = time.time()
     history = []
 
@@ -230,6 +253,15 @@ def main() -> int:
               f"{args.split} {eval_loss:.4f}", flush=True)
 
     elapsed = time.time() - t0
+
+    # Save the fitted weights so a later split can be evaluated with this
+    # exact model rather than a retrained one. Not committed: .gitignore
+    # excludes checkpoints/, and the model is reproducible from the frozen
+    # subsample, the recorded hyperparameters, and seed 42.
+    if HP["epochs"]:
+        ckpt_path.parent.mkdir(parents=True, exist_ok=True)
+        torch.save(model.state_dict(), ckpt_path)
+        print(f"\n  checkpoint -> {ckpt_path.relative_to(REPO)}")
 
     preds, truths, idxs, final_eval_loss = evaluate(
         model, eval_loader, device, criterion

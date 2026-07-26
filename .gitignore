@@ -13,3 +13,4 @@ __pycache__/
 *.key
 logs_*.txt
 adapters/
+checkpoints/

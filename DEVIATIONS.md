@@ -665,3 +665,73 @@ present in `ls` but contains no weights. Check for
 **Implication for Phase 7.** The test pass has longer runs. Either launch
 from a notebook cell, or add step-level checkpointing with
 `--resume-from-checkpoint` so a shutdown costs minutes rather than the run.
+
+---
+
+## D-013. Measured run-to-run variance under a fixed seed
+
+**Date:** 2026-07-26
+**Status:** Measurement. Bears on how confidently small differences can be
+reported.
+
+### Why it was measured
+
+`train_resnet.py` originally saved no checkpoint. Evaluating A6 on the test
+split would therefore have required retraining, and the test number would
+have come from a different fitted model than the validation number,
+confounding generalization with run-to-run variance.
+
+The script now saves `checkpoints/A6_{dataset}/resnet18.pt` after training
+and accepts `--eval-only` to load it. A6 was retrained once so a checkpoint
+exists, which produced an incidental replication.
+
+### The measurement
+
+Identical seed (42), identical hash-verified subsample, identical code and
+hyperparameters. Only GPU scheduling nondeterminism differs.
+
+| Dataset | First run | Replication | Delta |
+|---|---|---|---|
+| DermaMNIST | 0.731 | 0.739 | +0.008 |
+| BloodMNIST | 0.991 | 0.989 | -0.002 |
+
+**Run-to-run variance is roughly 0.008 macro-F1 for ResNet-18 training on
+this data.**
+
+### What it implies for the reported results
+
+Section E4 acknowledged that a single seed limits inference about run-to-run
+variance. This is the first empirical estimate.
+
+| Result | Magnitude | Multiple of observed variance |
+|---|---|---|
+| H3 interaction | +0.118 | ~15x |
+| H2 DermaMNIST | +0.141 | ~18x |
+| H1 DermaMNIST | +0.198 | ~25x |
+| H4 DermaMNIST | +0.156 | ~20x |
+| H4 BloodMNIST | +0.039 | ~5x |
+| **H2 BloodMNIST** | **+0.023** | **~3x** |
+
+The primary result and the large effects are far above this floor. **The
+BloodMNIST H2 advantage of +0.023 is only about three times the observed
+variance and should be reported with that caveat**, even though its bootstrap
+interval [+0.0094, +0.0364] excludes zero. The bootstrap quantifies sampling
+uncertainty over the evaluation set. It does not quantify variance from
+retraining, and those are different sources.
+
+**Limitation of this estimate.** It comes from ResNet-18 training, not LoRA
+fine-tuning of a 4B model. Different architecture, different optimizer,
+different batch composition. Suggestive for the LoRA arms rather than
+directly applicable. Measuring LoRA variance properly would require the
+seed-43 and seed-44 repeats section E4 left conditional on budget.
+
+### Consequence for committed files
+
+The A6 raw prediction files were overwritten by the replication, so the
+committed A6 predictions and the checkpoint now correspond to the same
+model. Validation macro-F1 for A6 is therefore 0.739 and 0.989, not the
+0.731 and 0.991 quoted in earlier working notes.
+
+H4 shifted accordingly, from +0.1477 to +0.1556 on DermaMNIST and from
++0.0407 to +0.0389 on BloodMNIST. The H3 interaction was byte-identical at
++0.1178, as expected, since it is computed only from A4 and A5.
