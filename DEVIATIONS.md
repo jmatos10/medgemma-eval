@@ -448,3 +448,123 @@ Phase 4 does not address. One thing is now known that bears on H3: MedGemma's
 zero-shot advantage on the in-domain modality (DermaMNIST) over the
 out-of-domain one (BloodMNIST) is large before any fine-tuning. Whether that
 gap survives LoRA on both models is the actual test.
+
+---
+
+## D-010. Phase 5 setup: subsample, training target, and throughput decisions
+
+**Date:** 2026-07-25
+**Status:** Decisions under prespecified latitude, plus one logging note.
+
+### D-010a. Epochs fixed at 1
+
+Section B3 requires epochs be held constant across A4 and A5 but never fixed
+the value. Set to **1**.
+
+Rationale is compute budget, consistent with F5, which already states that
+subsampling to 5,000 images puts absolute performance below full-data
+fine-tuning while leaving between-arm comparisons valid. The same argument
+covers epochs: a smaller budget lowers both arms equally, and H2 and H3
+compare arms rather than absolute performance.
+
+### D-010b. Training subsample is simple random, not stratified
+
+Section C3 fixed 5,000 images at seed 42 and did not specify the sampling
+scheme. Simple random was chosen.
+
+Stratifying to balance classes would train on one distribution and evaluate
+on another, so the model's learned prior would not match the distribution it
+is scored against. Simple random preserves the natural imbalance.
+
+Drawn indices are frozen in `subsamples/{dataset}_train_5000.json` with a
+SHA-256 of the sorted index list. `load_subsample()` re-derives the hash and
+refuses to proceed on a mismatch, so A4, A5, and A6 provably see identical
+data rather than assertedly.
+
+Realized class proportions track the parent split within 0.86 percentage
+points on both datasets.
+
+**Known cost.** DermaMNIST class 3 (dermatofibroma) gets 56 training
+examples and class 6 (vascular lesions) gets 68. At one epoch each is seen
+once. Both will likely score near-zero F1 in A4 and A5, so 2 of 7 classes
+contribute nothing to macro-F1 for either model.
+
+This does not bias H2 or H3, since both arms face it identically. It reduces
+sensitivity: the predicted MedGemma advantage is 1 to 5 points of macro-F1,
+and diluting the metric across two dead classes makes a small real
+difference harder to resolve against the bootstrap interval. Logged now
+rather than raised after seeing results. The primary metric is not changing.
+
+### D-010c. Training target is the bare canonical label
+
+Target is `melanocytic nevi`, not a formatted sentence. Loss is computed on
+target tokens only; prompt, image, and padding tokens are set to -100.
+Verified by decoding the first batch: 7 of 342 tokens supervised, decoding
+to the bare label plus the turn-end token.
+
+Phase 4 established that MedGemma emits a bare label zero times in 2,715
+zero-shot attempts. Training on formatted prose would carry that format
+penalty into A4 and A5. Bare labels mean the four parsers should converge on
+the fine-tuned arms, and that convergence is the answer to Q1.
+
+Q1 then decomposes without a further experiment: A1 to A4 is the total jump,
+A3 to A4 is the medical component alone since A3 carries no format penalty,
+and the difference is the format component.
+
+**Limitation.** Fine-tuning on bare labels makes the model better at
+classification and worse at explaining itself. This study measures
+classification, not clinical utility.
+
+### D-010d. Vision encoder frozen
+
+LoRA is applied to language-model projections only, 238 modules spanning
+layers 0 to 33. Target modules are discovered by scanning `named_modules`
+and excluding anything under the vision tower, because SigLIP also exposes
+`q_proj` and a bare suffix match would adapt it.
+
+The script counts trainable parameters under the vision tower and exits if
+the count is not zero.
+
+This is required for H3 to mean anything. H3 asks what MedGemma's image
+encoder absorbed during medical pretraining. Fine-tuning that encoder would
+let both models learn the modality during training and wash out the
+difference being tested.
+
+Trainable: 29,802,496 of 4,329,881,968 parameters, 0.688 percent.
+
+### D-010e. Gradient checkpointing disabled, measured not assumed
+
+64-example smoke test, A4 on DermaMNIST, identical seed and effective batch:
+
+| Configuration | Samples/sec | Train loss |
+|---|---|---|
+| batch 2, accum 8, checkpointing on | 1.048 | 1.4993 |
+| batch 2, accum 8, checkpointing off | 2.185 | 1.5010 |
+
+Checkpointing trades compute for activation memory. Disabling it more than
+doubles throughput. The near-identical loss confirms the optimization is
+untouched.
+
+Batch 4 was tried and ran out of memory inside `cross_entropy`, whose logits
+tensor is `[batch x sequence, 262k vocabulary]` in float32, about 1.4 GB at
+batch 4. Batch stays at 2 with accumulation 8, effective batch 16.
+
+The script refuses to run if `batch x accum` does not equal 16, so
+throughput can be retuned without the optimization drifting between arms.
+Defaults were changed in the committed file rather than passed as flags, so
+B3 compliance does not depend on remembering three arguments four times.
+
+Revised Phase 5 estimate: 4 runs, about 38 minutes each, 2.5 GPU-hours,
+roughly $2.75. This brings the projected project total to about 13.5
+GPU-hours, within the 14-hour cap in section C4.
+
+### D-010f. Two smoke-test records in results.jsonl
+
+Two 64-example runs appended records to `results/results.jsonl` during setup.
+Hard rule 5 makes that file append-only, so they remain.
+
+They are identifiable by `n_train: 64`. The script was subsequently patched
+to write `"smoke_test": true` on any run using `--limit`, but the two
+existing records predate that field.
+
+**Analysis must filter Phase 5 training records to `n_train == 5000`.**
