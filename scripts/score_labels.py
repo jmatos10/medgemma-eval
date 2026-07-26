@@ -1,236 +1,347 @@
 """
-score_arms.py
+score_labels.py
 
-Turns a raw output file into logged metrics. Reads `results/raw/*.jsonl`,
-applies every parser, computes the preregistered outcomes with bootstrap
-confidence intervals, and appends one record per arm to
-`results/results.jsonl`.
+Arm A3, constrained decoding. The model never writes free text. Instead we
+ask it, for each candidate class label, how likely it considers that exact
+sequence of tokens given the image and prompt. Highest score wins.
 
-No GPU. No model. This runs entirely off saved text, which is the point of
-hard rule 4: re-scoring must never require re-running inference.
+A parse failure is impossible by construction, which is the point. A1 and A2
+measure how often the model's answer survives a parser. A3 measures what the
+model actually believes.
 
-Handles two file shapes, detected automatically:
+THE MATH
+--------
+A language model assigns a probability to each next token. The probability of
+a whole label is the product of its token probabilities, each conditioned on
+everything before it:
 
-  generation files  have `output_text`   -> arms A1, A2, A2b
-  scoring files     have `logp_mean`     -> arm A3 and its robustness variants
+    P(label | image, prompt) = P(t1) * P(t2 | t1) * P(t3 | t1,t2) * ...
+
+Probabilities multiply to very small numbers, so we work in logs, where
+multiplication becomes addition:
+
+    log P(label) = sum_i log P(t_i | image, prompt, t_1..t_{i-1})
+
+THE LENGTH TRAP
+---------------
+Every term in that sum is negative, because probabilities are below 1. So
+longer labels score worse purely for being longer. BloodMNIST class 3 is
+"immature granulocytes(myelocytes, metamyelocytes and promyelocytes)", about
+25 tokens, against "platelet" at about 3. At an identical per-token
+confidence of -0.5, class 3 scores -12.5 and platelet scores -1.5. Class 3
+would be structurally unable to win, and its F1 would read as a hematology
+failure rather than as arithmetic.
+
+Three scores are computed for every image and label. Primary was fixed in
+the Phase 4 spec before any run, so the flattering variant cannot be chosen
+afterward.
+
+    sum   raw sum of log probabilities, length-penalized, logged only
+    mean  sum divided by token count. PRIMARY. length cancels.
+    pmi   log P(label | image, prompt) - log P(label | prompt only)
+          corrects for some labels being common in English regardless of
+          the image. Robustness check.
 
 Usage, from the repo root:
-    python scripts/score_arms.py results/raw/gen_dermamnist_val.jsonl
-    python scripts/score_arms.py results/raw/A3_dermamnist_val.jsonl
+    python scripts/score_labels.py --dataset dermamnist --n 50
 
-Add --gpu-seconds to record what the inference run cost, since this script
-cannot know it.
+Start with --n 50 to confirm it runs before spending on the full split.
 """
 
 import argparse
 import json
 import sys
-from collections import Counter
+import time
 from pathlib import Path
+
+import numpy as np
+import torch
+import torch.nn.functional as F
+from PIL import Image
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "src"))
 
-from eval_harness import (  # noqa: E402
-    UNPARSEABLE,
-    append_result,
-    bootstrap_ci,
-    bootstrap_difference,
-    compute_metrics,
-    parse_extracted,
-    parse_lenient,
-    parse_strict,
-)
+from eval_harness import CANONICAL, prompt_for  # noqa: E402
+
+REVISIONS = {
+    "google/medgemma-1.5-4b-it": "91850547d9f0b2fdd21aa7c5f4f3d1a8a52c243b",
+    "google/gemma-3-4b-it": "093f9f388b31de276ce2de164bdc2081324b9767",
+}
 
 L4_HOURLY_USD = 1.082
 
-# arm id -> (parser, preregistered?)
-GENERATION_ARMS = [
-    ("A1", "strict", parse_strict, True),
-    ("A2", "lenient", parse_lenient, True),
-    ("A2b", "extraction", parse_extracted, False),
-]
+DATASET_CLASSES = {"dermamnist": "DermaMNIST", "bloodmnist": "BloodMNIST"}
 
-# arm id -> (record key, scoring name, primary?)
-SCORING_ARMS = [
-    ("A3", "pred_mean", "mean logp per token", True),
-    ("A3-sum", "pred_sum", "raw logp sum", False),
-    ("A3-pmi", "pred_pmi", "pointwise mutual information", False),
-]
+# Keys returned by the processor that run along the sequence dimension and
+# therefore must be extended when candidate label tokens are appended.
+SEQ_KEYS = ("input_ids", "attention_mask", "token_type_ids")
 
 
-def load(path: Path):
-    records = [json.loads(line) for line in path.open() if line.strip()]
-    if not records:
-        raise SystemExit(f"{path} is empty")
-    return records
+def get_hf_token(project_number: str = "609652923595") -> str:
+    from google.cloud import secretmanager
+
+    client = secretmanager.SecretManagerServiceClient()
+    name = f"projects/{project_number}/secrets/hf-token/versions/latest"
+    return client.access_secret_version(name=name).payload.data.decode()
 
 
-def majority_baseline(y):
-    """Accuracy and macro-F1 of always answering the most common true class.
+def load_split(dataset: str, split: str, n: int, seed: int = 42):
+    import medmnist
 
-    Any model must beat this to have demonstrated anything. On DermaMNIST a
-    constant predictor scores 67 percent accuracy while carrying no
-    diagnostic information, which is why macro-F1 is the primary outcome.
+    cls = getattr(medmnist, DATASET_CLASSES[dataset])
+    ds = cls(split=split, size=224, download=False)
+    rng = np.random.default_rng(seed)
+    k = len(ds.imgs) if n <= 0 else min(n, len(ds.imgs))
+    idx = rng.choice(len(ds.imgs), size=k, replace=False)
+    idx.sort()
+    images = [Image.fromarray(ds.imgs[i]) for i in idx]
+    labels = [int(ds.labels[i][0]) for i in idx]
+    return idx.tolist(), images, labels
+
+
+@torch.inference_mode()
+def score_candidates(model, processor, prompt: str, image, label_token_ids):
+    """Log probability of each candidate label, given prompt and optional image.
+
+    Returns two lists: summed log probability, and token count, one entry per
+    candidate. Pass image=None for the prompt-only term used by PMI.
+
+    All candidates are scored in a single batched forward pass. Each row is
+    the prompt followed by one candidate's tokens, right-padded. Causal
+    attention means trailing pad positions cannot influence earlier ones.
     """
-    counts = Counter(y)
-    top = counts.most_common(1)[0][0]
-    return top, counts[top] / len(y)
+    content = []
+    if image is not None:
+        content.append({"type": "image", "image": image})
+    content.append({"type": "text", "text": prompt})
+    messages = [[{"role": "user", "content": content}]]
 
+    enc = processor.apply_chat_template(
+        messages,
+        add_generation_prompt=True,
+        tokenize=True,
+        return_dict=True,
+        return_tensors="pt",
+    ).to(model.device)
 
-def report(arm, label, y_true, y_pred, dataset, meta, preregistered,
-           n_boot, seed):
-    m = compute_metrics(y_true, y_pred, dataset)
-    ci = bootstrap_ci(y_true, y_pred, dataset, "macro_f1",
-                      n_boot=n_boot, seed=seed)
+    prompt_len = enc["input_ids"].shape[1]
+    n_cand = len(label_token_ids)
+    lengths = [len(ids) for ids in label_token_ids]
+    max_len = max(lengths)
+    device = model.device
+    pad_id = processor.tokenizer.pad_token_id or 0
 
-    flag = "" if preregistered else "  [exploratory]"
-    print(f"\n{arm}  {label}{flag}")
-    print(f"  macro-F1     {m['macro_f1']:.3f}  "
-          f"95% CI [{ci['ci_low']:.3f}, {ci['ci_high']:.3f}]")
-    print(f"  accuracy     {m['accuracy']:.3f}")
-    print(f"  unparseable  {m['unparseable_rate']:.3f}")
-    print(f"  per-class F1 {[round(v, 2) for v in m['per_class_f1']]}")
-    print(f"  predictions  {dict(sorted(Counter(y_pred).items()))}")
+    batch = {}
+    for key, val in enc.items():
+        if key in SEQ_KEYS:
+            rows = []
+            for ids in label_token_ids:
+                tail = list(ids) + [pad_id] * (max_len - len(ids))
+                if key == "input_ids":
+                    ext = tail
+                elif key == "attention_mask":
+                    ext = [1] * len(ids) + [0] * (max_len - len(ids))
+                else:  # token_type_ids, label tokens are text
+                    ext = [0] * max_len
+                rows.append(torch.cat([
+                    val[0],
+                    torch.tensor(ext, dtype=val.dtype, device=device),
+                ]))
+            batch[key] = torch.stack(rows)
+        else:
+            # pixel_values and anything else: one copy per candidate
+            reps = [1] * val.dim()
+            reps[0] = n_cand
+            batch[key] = val.repeat(*reps)
 
-    record = {
-        "arm": arm,
-        "treatment": label,
-        "preregistered": preregistered,
-        **meta,
-        **m,
-        "macro_f1_ci_low": ci["ci_low"],
-        "macro_f1_ci_high": ci["ci_high"],
-        "n_bootstrap": n_boot,
-    }
-    append_result(record, str(REPO / "results" / "results.jsonl"))
-    return m, y_pred
+    out = model(**batch)
+
+    # Only the positions that predict label tokens matter. Running
+    # log_softmax across the whole sequence materializes a float32 tensor of
+    # shape [candidates, sequence, vocabulary]. Gemma's vocabulary is about
+    # 262k, so at 7 candidates and 300 positions that is over 2 GB for a
+    # single image, and every position outside the label span is discarded
+    # immediately afterward.
+    #
+    # Position p predicts the token at p+1, so the span that predicts the
+    # label starts at prompt_len - 1.
+    start = prompt_len - 1
+    sliced = out.logits[:, start:start + max_len, :].float()
+    logprobs = F.log_softmax(sliced, dim=-1)
+
+    sums = []
+    for k, ids in enumerate(label_token_ids):
+        total = 0.0
+        for i, tok in enumerate(ids):
+            total += float(logprobs[k, i, tok])
+        sums.append(total)
+
+    return sums, lengths
 
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("path", help="a file under results/raw/")
-    ap.add_argument("--n-boot", type=int, default=1000)
-    ap.add_argument("--seed", type=int, default=42)
-    ap.add_argument("--gpu-seconds", type=float, default=None,
-                    help="inference cost of the run that produced this file")
-    ap.add_argument("--dry-run", action="store_true",
-                    help="print metrics without appending to results.jsonl")
+    ap.add_argument("--dataset", default="dermamnist", choices=list(CANONICAL))
+    ap.add_argument("--split", default="val")
+    ap.add_argument("--n", type=int, default=50, help="0 for the whole split")
+    ap.add_argument("--model", default="google/medgemma-1.5-4b-it")
+    ap.add_argument("--tag", default="A3",
+                    help="output filename prefix, e.g. 'A3full' for a full run")
+    ap.add_argument("--resume", action="store_true",
+                    help="skip images already present in the output file")
     args = ap.parse_args()
 
-    path = Path(args.path)
-    if not path.exists():
-        print(f"No such file: {path}")
+    if args.model not in REVISIONS:
+        print(f"Refusing to load unpinned model {args.model!r}.")
+        return 1
+    revision = REVISIONS[args.model]
+
+    if not torch.cuda.is_available():
+        print("No CUDA device. Start the instance and check nvidia-smi.")
         return 1
 
-    records = load(path)
-    first = records[0]
-    dataset = first["dataset"]
-    split = first["split"]
-    y_true = [r["true_label"] for r in records]
+    from transformers import AutoModelForImageTextToText, AutoProcessor
 
-    if "output_text" in first:
-        kind = "generation"          # A1, A2, A2b share one generation pass
-    elif "pred_class" in first:
-        kind = "direct"              # A6, a classifier emits a class index
-    else:
-        kind = "scoring"             # A3 and its normalization variants
+    labels_text = CANONICAL[args.dataset]
+    prompt = prompt_for(args.dataset)
 
-    print(f"file      {path.name}")
-    print(f"kind      {kind}")
-    print(f"dataset   {dataset} [{split}]")
-    print(f"n         {len(records)}")
-    print(f"model     {first.get('model')}")
-    print(f"revision  {first.get('revision')}")
+    print(f"model     {args.model}")
+    print(f"revision  {revision}")
+    print(f"dataset   {args.dataset} [{args.split}], n={args.n or 'all'}")
+    print(f"candidates {len(labels_text)}")
+    print()
 
-    top_class, top_share = majority_baseline(y_true)
-    print(f"\ntruth spread {dict(sorted(Counter(y_true).items()))}")
-    print(f"majority baseline: class {top_class}, accuracy {top_share:.3f}")
+    token = get_hf_token()
 
-    if split == "test":
-        print("\n  Scoring the TEST split. Hard rule 1 allows this exactly")
-        print("  once, after all arms are complete. If development is still")
-        print("  in progress, stop.")
+    indices, images, truths = load_split(args.dataset, args.split, args.n)
+    print(f"Loaded {len(images)} images")
 
-    meta = {
-        "dataset": dataset,
-        "split": split,
-        "model": first.get("model"),
-        "revision": first.get("revision"),
-        "n": len(records),
-        "seed": args.seed,
-        "source_file": path.name,
-    }
-    if args.gpu_seconds is not None:
-        meta["gpu_seconds"] = args.gpu_seconds
-        meta["est_usd"] = round(args.gpu_seconds / 3600 * L4_HOURLY_USD, 4)
+    processor = AutoProcessor.from_pretrained(
+        args.model, revision=revision, token=token
+    )
+    model = AutoModelForImageTextToText.from_pretrained(
+        args.model, revision=revision, token=token,
+        dtype=torch.bfloat16, device_map="auto",
+    )
+    model.eval()
+    print(f"Model on {model.device}, dtype {model.dtype}")
 
-    if args.dry_run:
-        global append_result
-
-        def append_result(*_a, **_k):  # noqa: F811
-            return None
-        print("\n(dry run, nothing will be written to results.jsonl)")
-
-    preds = {}
-
-    if kind == "generation":
-        for arm, label, fn, prereg in GENERATION_ARMS:
-            y_pred = [fn(r["output_text"], dataset) for r in records]
-            report(arm, label, y_true, y_pred, dataset, meta, prereg,
-                   args.n_boot, args.seed)
-            preds[arm] = y_pred
-
-        # H1 is about exactly this gap.
-        if "A1" in preds and "A2b" in preds:
-            d = bootstrap_difference(y_true, preds["A2b"], preds["A1"],
-                                     dataset, "macro_f1",
-                                     n_boot=args.n_boot, seed=args.seed)
-            print(f"\nA2b minus A1 macro-F1: {d['difference']:+.3f}  "
-                  f"95% CI [{d['ci_low']:+.3f}, {d['ci_high']:+.3f}]")
-            print(f"  excludes zero: {d['excludes_zero']}")
-            print("  H1 predicted at least +0.10 from format handling alone.")
-    elif kind == "direct":
-        # A classifier produces a class index directly. No parsing, no
-        # normalization, no possibility of an unparseable answer. Routed
-        # through this script rather than scored inline so that A6 carries
-        # the same bootstrap intervals as every other arm in the table.
-        arm = first.get("arm", "A6")
-        y_pred = [r["pred_class"] for r in records]
-        report(arm, "direct classification", y_true, y_pred, dataset, meta,
-               True, args.n_boot, args.seed)
-        preds[arm] = y_pred
-    else:
-        for arm, key, label, primary in SCORING_ARMS:
-            if key not in first:
-                continue
-            y_pred = [r[key] for r in records]
-            star = " (primary, prespecified)" if primary else ""
-            report(arm, label + star, y_true, y_pred, dataset, meta, True,
-                   args.n_boot, args.seed)
-            preds[arm] = y_pred
-
-        keys = [k for k in ("A3", "A3-sum", "A3-pmi") if k in preds]
-        if len(keys) == 3:
-            agree = sum(
-                1 for i in range(len(records))
-                if preds["A3"][i] == preds["A3-sum"][i] == preds["A3-pmi"][i]
-            )
-            print(f"\nAll three scorings agree on {agree}/{len(records)}")
-            print("  Disagreement means the normalization choice changes the")
-            print("  answer. Report as a robustness finding, and note that")
-            print("  the primary was fixed before any run.")
-
-    unparseable_arms = [
-        a for a, p in preds.items()
-        if sum(1 for v in p if v == UNPARSEABLE) == len(p)
+    # Tokenize each candidate once. add_special_tokens=False because these
+    # continue the prompt rather than starting a new sequence.
+    tok = processor.tokenizer
+    label_token_ids = [
+        tok(lbl, add_special_tokens=False)["input_ids"] for lbl in labels_text
     ]
-    if unparseable_arms:
-        print(f"\n  {unparseable_arms} scored 100 percent unparseable.")
-        print("  Expected for A1. Investigate for any other arm.")
+    print("candidate token counts:",
+          {i: len(v) for i, v in enumerate(label_token_ids)})
 
-    if not args.dry_run:
-        print(f"\nAppended {len(preds)} records to results/results.jsonl")
+    # PMI denominator: prompt-only, no image. Identical for every image, so
+    # compute it once rather than per image.
+    print("Computing prompt-only baseline for PMI...")
+    prior_sums, lengths = score_candidates(
+        model, processor, prompt, None, label_token_ids
+    )
+    print("  done")
+
+    out_path = REPO / "results" / "raw" / f"{args.tag}_{args.dataset}_{args.split}.jsonl"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Resume support. Records append per image, so a killed run leaves a
+    # valid partial file. A hard kill can truncate the last line, so
+    # unparseable lines are skipped rather than treated as fatal.
+    done_indices = set()
+    if args.resume and out_path.exists():
+        with out_path.open() as fh:
+            for line in fh:
+                try:
+                    done_indices.add(json.loads(line)["image_index"])
+                except (json.JSONDecodeError, KeyError):
+                    pass
+        print(f"Resuming: {len(done_indices)} images already scored")
+    elif out_path.exists():
+        out_path.unlink()
+
+    work = [
+        (i, im, t)
+        for i, im, t in zip(indices, images, truths)
+        if i not in done_indices
+    ]
+    print(f"{len(work)} images to score")
+
+    t0 = time.time()
+    n_done = 0
+
+    with out_path.open("a") as out_fh:
+        for idx, img, truth in work:
+            sums, lens = score_candidates(
+                model, processor, prompt, img, label_token_ids
+            )
+            means = [s / L for s, L in zip(sums, lens)]
+            pmis = [s - p for s, p in zip(sums, prior_sums)]
+
+            out_fh.write(json.dumps({
+                "dataset": args.dataset,
+                "split": args.split,
+                "image_index": int(idx),
+                "true_label": int(truth),
+                "model": args.model,
+                "revision": revision,
+                "arm": "A3",
+                "logp_sum": sums,
+                "logp_mean": means,
+                "logp_pmi": pmis,
+                "token_counts": lens,
+                "pred_sum": int(np.argmax(sums)),
+                "pred_mean": int(np.argmax(means)),   # primary
+                "pred_pmi": int(np.argmax(pmis)),
+            }) + "\n")
+            n_done += 1
+
+            if n_done % 10 == 0 or n_done == len(work):
+                out_fh.flush()
+                rate = (time.time() - t0) / n_done
+                print(f"  {n_done}/{len(work)}  {rate:.2f}s/image", end="\r",
+                      flush=True)
+
+    elapsed = time.time() - t0
+    print()
+
+    # Read back from disk so a resumed run reports on the whole split.
+    records = [json.loads(line) for line in out_path.open()]
+    print(f"{len(records)} total records in {out_path.name}")
+
+    # ---------------- report ----------------
+    from collections import Counter
+
+    from eval_harness import compute_metrics
+
+    y = [r["true_label"] for r in records]
+    print("\n=== A3 CONSTRAINED DECODING ===")
+    print(f"{'scoring':10}{'accuracy':>10}{'macro_f1':>10}  prediction spread")
+    print("-" * 62)
+    for name, key in [("mean*", "pred_mean"), ("sum", "pred_sum"),
+                      ("pmi", "pred_pmi")]:
+        p = [r[key] for r in records]
+        m = compute_metrics(y, p, args.dataset)
+        spread = dict(sorted(Counter(p).items()))
+        print(f"{name:10}{m['accuracy']:>10.3f}{m['macro_f1']:>10.3f}  {spread}")
+    print("-" * 62)
+    print("* primary, prespecified before any run")
+
+    majority = max(Counter(y).values()) / len(y)
+    print(f"\ntruth spread {dict(sorted(Counter(y).items()))}")
+    print(f"majority baseline accuracy {majority:.3f}")
+
+    agree = sum(1 for r in records
+                if r["pred_mean"] == r["pred_sum"] == r["pred_pmi"])
+    print(f"all three scorings agree on {agree}/{len(records)} images")
+
+    cost = elapsed / 3600 * L4_HOURLY_USD
+    print(f"\n=== COST ===")
+    print(f"  {elapsed:.0f}s  ~${cost:.3f}  ({elapsed/len(records):.2f}s/image)")
+    print(f"  raw scores -> {out_path.relative_to(REPO)}")
+
     return 0
 
 
