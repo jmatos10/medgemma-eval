@@ -1,0 +1,39 @@
+# Versions verified on the instance that produced every result in this
+# repository. See SETUP.md section 2.
+#
+# torch is deliberately absent. It ships with the Vertex AI Workbench image
+# as 2.12.1+cu130, built against CUDA 13.0, and installing it from PyPI would
+# pull a different CUDA build. Install torch to match your own hardware
+# first, then install this file.
+#
+# Hard rule 2 pins model revisions. This file pins the stack around them, so
+# that a rerun differs from the original in neither weights nor library
+# behaviour.
+
+transformers==5.14.1
+huggingface_hub==1.24.0
+peft>=0.19.0
+accelerate>=1.6.0
+
+medmnist==3.0.2
+scikit-learn==1.9.0
+numpy>=2.0
+pillow>=10.0
+
+matplotlib>=3.8
+
+google-cloud-secret-manager>=2.20.0
+
+# Notes on the loosely pinned entries:
+#
+#   peft, accelerate     installed without a version pin during the project,
+#                        so the exact build is not recorded. Floors reflect
+#                        the minimum with a compatible API.
+#   numpy, pillow        transitive, no version-specific behaviour relied on.
+#   matplotlib           figures only, no effect on any reported number.
+#   secret-manager       reads the Hugging Face token at runtime. Drop it and
+#                        pass a token another way if you are not on GCP.
+#
+# transformers 5.x is a hard requirement, not a preference. The scripts use
+# `dtype=` in `from_pretrained` and pass images inline to
+# `processor.apply_chat_template`, neither of which exists in 4.x.

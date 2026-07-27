@@ -1,6 +1,7 @@
 # SETUP
 
-Environment record for `medgemma-eval`.
+Environment record for `medgemma-eval`. Everything here was verified on the
+machine, not assumed. Update when any value changes.
 
 All infrastructure was configured through the Google Cloud Console web UI.
 No `gcloud` CLI was used.
@@ -128,7 +129,7 @@ Cached under `/home/jupyter/.medmnist`, roughly 2.6 GB for both datasets.
 | | DermaMNIST | BloodMNIST |
 |---|---|---|
 | Download | 1.09 GB | 1.54 GB |
-| Train / val / test | 7,007 / 1,003 / 2,005 | 11,959 / official / official |
+| Train / val / test | 7,007 / 1,003 / 2,005 | 11,959 / 1,712 / 3,421 |
 | Classes | 7 | 8 |
 | Shape | (N, 224, 224, 3) | (N, 224, 224, 3) |
 | Majority class share (train) | 67.0% | 19.5% |
