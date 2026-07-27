@@ -92,6 +92,8 @@ def main() -> int:
     ap.add_argument("--model", default="google/medgemma-1.5-4b-it")
     ap.add_argument("--tag", default="pilot",
                     help="output filename prefix, e.g. 'gen' for a full run")
+    ap.add_argument("--resume", action="store_true",
+                    help="skip images already present in the output file")
     args = ap.parse_args()
 
     if args.model not in REVISIONS:
@@ -141,89 +143,121 @@ def main() -> int:
 
     out_path = REPO / "results" / "raw" / f"{args.tag}_{args.dataset}_{args.split}.jsonl"
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    if out_path.exists():
+
+    # Resume support. Records are appended per batch, so a crashed or killed
+    # run leaves a valid partial file. A hard kill can truncate the final
+    # line, so unparseable lines are skipped rather than treated as fatal.
+    done_indices = set()
+    if args.resume and out_path.exists():
+        with out_path.open() as fh:
+            for line in fh:
+                try:
+                    done_indices.add(json.loads(line)["image_index"])
+                except (json.JSONDecodeError, KeyError):
+                    pass
+        print(f"  resuming: {len(done_indices)} images already done")
+    elif out_path.exists():
         out_path.unlink()
 
-    records = []
+    work = [
+        (i, im, lb)
+        for i, im, lb in zip(indices, images, labels)
+        if i not in done_indices
+    ]
+    if not work:
+        print("  nothing left to do")
+    else:
+        print(f"  {len(work)} images to generate")
+
     t_gen = time.time()
+    n_written = 0
 
-    for start in range(0, len(images), args.batch_size):
-        batch_imgs = images[start:start + args.batch_size]
-        batch_idx = indices[start:start + args.batch_size]
-        batch_lbl = labels[start:start + args.batch_size]
+    # Append mode, flushed after every batch. Holding all records in memory
+    # and writing once at the end means a crash at image 900 loses 900
+    # images of GPU time.
+    with out_path.open("a") as out_fh:
+        for start in range(0, len(work), args.batch_size):
+            chunk = work[start:start + args.batch_size]
+            batch_idx = [c[0] for c in chunk]
+            batch_imgs = [c[1] for c in chunk]
+            batch_lbl = [c[2] for c in chunk]
 
-        messages = [
-            [{"role": "user", "content": [
-                {"type": "image", "image": img},
-                {"type": "text", "text": prompt},
-            ]}]
-            for img in batch_imgs
-        ]
+            messages = [
+                [{"role": "user", "content": [
+                    {"type": "image", "image": img},
+                    {"type": "text", "text": prompt},
+                ]}]
+                for img in batch_imgs
+            ]
 
-        inputs = processor.apply_chat_template(
-            messages,
-            padding=True,
-            add_generation_prompt=True,
-            tokenize=True,
-            return_dict=True,
-            return_tensors="pt",
-        ).to(model.device, dtype=torch.bfloat16)
+            inputs = processor.apply_chat_template(
+                messages,
+                padding=True,
+                add_generation_prompt=True,
+                tokenize=True,
+                return_dict=True,
+                return_tensors="pt",
+            ).to(model.device, dtype=torch.bfloat16)
 
-        input_len = inputs["input_ids"].shape[1]
+            input_len = inputs["input_ids"].shape[1]
 
-        with torch.inference_mode():
-            out = model.generate(
-                **inputs,
-                max_new_tokens=args.max_new_tokens,
-                do_sample=False,           # greedy, deterministic
-            )
+            with torch.inference_mode():
+                out = model.generate(
+                    **inputs,
+                    max_new_tokens=args.max_new_tokens,
+                    do_sample=False,           # greedy, deterministic
+                )
 
-        new_tokens = out[:, input_len:]
-        texts = processor.batch_decode(new_tokens, skip_special_tokens=True)
+            new_tokens = out[:, input_len:]
+            texts = processor.batch_decode(new_tokens, skip_special_tokens=True)
 
-        # Count real tokens by finding the first stop token in each row.
-        #
-        # Do not count by filtering the pad id. In batched generation the
-        # framework fills finished sequences so every row matches the longest
-        # one, and the fill token is not necessarily tokenizer.pad_token_id.
-        # Gemma stops on <end_of_turn> (106), not <eos> (1), so a pad-based
-        # filter silently reports the batch maximum for every sequence.
-        tok = processor.tokenizer
-        stop_ids = {tok.eos_token_id, tok.convert_tokens_to_ids("<end_of_turn>")}
-        stop_ids.discard(None)
+            # Count real tokens by finding the first stop token in each row.
+            #
+            # Do not count by filtering the pad id. In batched generation the
+            # framework fills finished sequences so every row matches the
+            # longest one, and the fill token is not necessarily
+            # tokenizer.pad_token_id. Gemma stops on <end_of_turn> (106), not
+            # <eos> (1), so a pad-based filter silently reports the batch
+            # maximum for every sequence.
+            tok = processor.tokenizer
+            stop_ids = {tok.eos_token_id,
+                        tok.convert_tokens_to_ids("<end_of_turn>")}
+            stop_ids.discard(None)
 
-        for j, text in enumerate(texts):
-            row = new_tokens[j].tolist()
-            n_new = len(row)
-            finish = "length"
-            for k, tid in enumerate(row):
-                if tid in stop_ids:
-                    n_new = k + 1
-                    finish = "eos"
-                    break
-            rec = {
-                "dataset": args.dataset,
-                "split": args.split,
-                "image_index": int(batch_idx[j]),
-                "true_label": int(batch_lbl[j]),
-                "model": args.model,
-                "revision": revision,
-                "max_new_tokens": args.max_new_tokens,
-                "n_new_tokens": n_new,
-                "finish_reason": finish,
-                "output_text": text,
-            }
-            records.append(rec)
+            for j, text in enumerate(texts):
+                row = new_tokens[j].tolist()
+                n_new = len(row)
+                finish = "length"
+                for k, tid in enumerate(row):
+                    if tid in stop_ids:
+                        n_new = k + 1
+                        finish = "eos"
+                        break
+                rec = {
+                    "dataset": args.dataset,
+                    "split": args.split,
+                    "image_index": int(batch_idx[j]),
+                    "true_label": int(batch_lbl[j]),
+                    "model": args.model,
+                    "revision": revision,
+                    "max_new_tokens": args.max_new_tokens,
+                    "n_new_tokens": n_new,
+                    "finish_reason": finish,
+                    "output_text": text,
+                }
+                out_fh.write(json.dumps(rec) + "\n")
+                n_written += 1
 
-        done = min(start + args.batch_size, len(images))
-        print(f"  {done}/{len(images)}", end="\r", flush=True)
+            out_fh.flush()
+            print(f"  {n_written}/{len(work)}", end="\r", flush=True)
 
     gen_seconds = time.time() - t_gen
-    print(f"  {len(records)}/{len(images)} done in {gen_seconds:.0f}s")
+    print(f"  {n_written}/{len(work)} generated in {gen_seconds:.0f}s")
 
-    with out_path.open("w") as fh:
-        for rec in records:
-            fh.write(json.dumps(rec) + "\n")
+    # Report from the file rather than from memory, so a resumed run
+    # summarizes the whole split and not just this session's share.
+    records = [json.loads(line) for line in out_path.open()]
+    print(f"  {len(records)} total records in {out_path.name}")
 
     # ---------------- report ----------------
     lengths = np.array([r["n_new_tokens"] for r in records])

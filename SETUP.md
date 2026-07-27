@@ -1,7 +1,6 @@
 # SETUP
 
-Environment record for `medgemma-eval`. Everything here was verified on the
-machine, not assumed. Update when any value changes.
+Environment record for `medgemma-eval`.
 
 All infrastructure was configured through the Google Cloud Console web UI.
 No `gcloud` CLI was used.
@@ -90,7 +89,7 @@ from 'numpy.core.numeric'`. This surfaced as a generic
 
 ## 3. Pinned model revisions
 
-`CLAUDE.md` hard rule 2 requires `revision=` on every model load. Google has
+Every model load pins a revision. Google has
 pushed mid-life fixes to this model family, including an end-of-image token
 correction documented on the MedGemma card.
 

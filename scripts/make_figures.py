@@ -214,14 +214,27 @@ def figure_interaction(data, split, out_dir, n_boot):
         lo, hi = np.percentile(draws, [2.5, 97.5])
         bars.append((ds, point, lo, hi))
 
-    fig, ax = plt.subplots(figsize=(7, 5))
+    # Reserve headroom before drawing, so the two-line value labels cannot
+    # collide with the title. Without an explicit limit matplotlib scales to
+    # the error bar and the label lands on top of the title.
+    y_hi = max(h for _, _, _, h in bars)
+    y_lo = min(0.0, min(l for _, _, l, _ in bars))
+    span = y_hi - y_lo
+
+    fig, ax = plt.subplots(figsize=(7.5, 5.5))
+
     for i, (ds, point, lo, hi) in enumerate(bars):
         color = "#0072B2" if ds == "dermamnist" else "#999999"
         ax.bar(i, point, color=color, width=0.55)
         ax.errorbar(i, point, yerr=[[point - lo], [hi - point]], fmt="none",
                     ecolor="black", capsize=5, linewidth=1.3)
-        ax.text(i, hi + 0.008, f"{point:+.3f}\n[{lo:+.3f}, {hi:+.3f}]",
-                ha="center", fontsize=9)
+        ax.text(i, hi + 0.045 * span,
+                f"{point:+.3f}\n[{lo:+.3f}, {hi:+.3f}]",
+                ha="center", va="bottom", fontsize=9)
+
+    # After plotting, not before. Adding artists re-triggers autoscale and
+    # silently discards a limit set earlier.
+    ax.set_ylim(y_lo - 0.04 * span, y_hi + 0.32 * span)
 
     ax.axhline(0, color="black", linewidth=1)
     ax.set_xticks(range(len(bars)))
@@ -230,7 +243,7 @@ def figure_interaction(data, split, out_dir, n_boot):
                   fontsize=10)
     ax.set_title("H3: is the advantage larger on a modality\n"
                  f"inside MedGemma's pretraining domains?  ({split} split)",
-                 fontsize=12)
+                 fontsize=12, pad=14)
     ax.grid(axis="y", alpha=0.25)
     ax.set_axisbelow(True)
     fig.text(0.5, 0.01,

@@ -175,13 +175,42 @@ def main() -> int:
     preds = {}
 
     if kind == "generation":
-        for arm, label, fn, prereg in GENERATION_ARMS:
-            y_pred = [fn(r["output_text"], dataset) for r in records]
-            report(arm, label, y_true, y_pred, dataset, meta, prereg,
-                   args.n_boot, args.seed)
-            preds[arm] = y_pred
+        # A fine-tuned file carries its own arm id (A4, A5). Zero-shot files
+        # written by pilot_lengths.py do not, and are the A1/A2/A2b source.
+        #
+        # Without this check every file containing output_text would be
+        # logged as A1, A2, and A2b, so A4 and A5 would overwrite the
+        # zero-shot records or be overwritten by them depending on filename
+        # order. Both outcomes silently corrupt results.jsonl.
+        arm_id = first.get("arm")
 
-        # H1 is about exactly this gap.
+        if arm_id:
+            variants = [
+                (arm_id, "strict parsing", parse_strict),
+                (f"{arm_id}-lenient", "lenient parsing", parse_lenient),
+                (f"{arm_id}-extract", "answer extraction", parse_extracted),
+            ]
+            for name, label, fn in variants:
+                y_pred = [fn(r["output_text"], dataset) for r in records]
+                report(name, label, y_true, y_pred, dataset, meta, True,
+                       args.n_boot, args.seed)
+                preds[name] = y_pred
+
+            base = preds.get(arm_id)
+            same = all(preds[v[0]] == base for v in variants)
+            print(f"\n  All three parsers agree on every item: {same}")
+            print("  Convergence means the format penalty is gone and every")
+            print("  remaining difference between arms is medical. That is")
+            print("  the answer to Q1.")
+        else:
+            for arm, label, fn, prereg in GENERATION_ARMS:
+                y_pred = [fn(r["output_text"], dataset) for r in records]
+                report(arm, label, y_true, y_pred, dataset, meta, prereg,
+                       args.n_boot, args.seed)
+                preds[arm] = y_pred
+
+        # H1 is about exactly this gap. Only meaningful for the zero-shot
+        # file, where A1 and A2b both exist.
         if "A1" in preds and "A2b" in preds:
             d = bootstrap_difference(y_true, preds["A2b"], preds["A1"],
                                      dataset, "macro_f1",

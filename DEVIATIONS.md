@@ -735,3 +735,101 @@ model. Validation macro-F1 for A6 is therefore 0.739 and 0.989, not the
 H4 shifted accordingly, from +0.1477 to +0.1556 on DermaMNIST and from
 +0.0407 to +0.0389 on BloodMNIST. The H3 interaction was byte-identical at
 +0.1178, as expected, since it is computed only from A4 and A5.
+
+---
+
+## D-014. Correction: the pretraining modality list was from MedGemma v1
+
+**Date:** 2026-07-27
+**Status:** Correction to a premise behind H3. Affects interpretation, not
+arithmetic.
+
+### What was wrong
+
+The working framing around H3 described MedGemma's image encoder as
+pretrained on "chest X-ray, dermatology, ophthalmology, and histopathology."
+
+That is the MedGemma v1 list. The model evaluated here is MedGemma 1.5,
+whose Technical Report (arXiv:2604.05081) describes a 400M MedSigLIP
+encoder trained on:
+
+1. 3D radiology (CT and MRI volumes)
+2. Whole-slide histopathology
+3. Chest X-ray with anatomical bounding-box localization
+4. Multi-timepoint radiology
+5. Dermatology
+
+Ophthalmology is not called out for 1.5.
+
+The error came from working off the earlier report without checking that it
+covered the checkpoint actually being run. The wrong technical report was
+also cited (arXiv:2507.05201, which covers MedGemma 4B and 27B).
+
+### H3's registered premise survives
+
+H3 states: "Dermatology appears in MedGemma's stated image-encoder
+pretraining domains; blood cell microscopy does not."
+
+Both halves remain true under the 1.5 list. Dermatology is named. Blood cell
+microscopy is not. No registered claim requires revision.
+
+### The substantive problem this surfaces
+
+**Whole-slide histopathology is brightfield microscopy of stained cells and
+tissue. A peripheral blood smear is also brightfield microscopy of stained
+cells.** They differ in preparation and in what is being counted, but they
+share imaging physics, magnification regime, and staining conventions.
+
+BloodMNIST is therefore **not the maximally out-of-domain control the
+preregistration implies.** It is a modality not named in the pretraining
+list, which shares substantial low-level visual structure with one that is.
+
+This should have been stated in section F as a threat to validity. It was
+not, because the modality list being used was wrong.
+
+### Direction of the bias
+
+Partial overlap between BloodMNIST and the pretraining distribution would be
+expected to **raise** MedGemma's out-of-domain performance, which
+**shrinks** the measured interaction. A genuinely distant modality, one
+sharing neither imaging physics nor stain, would plausibly show a larger
+gap.
+
+So the reported interaction is more likely an underestimate than an
+overestimate. That is stated as a direction of bias, not as a defence of the
+result: the contrast is weaker than registered, and a weaker contrast is a
+weaker test regardless of which way the bias runs.
+
+### Anchor from the 1.5 report
+
+Reported zero-shot: DermMCQA 73.5, PathMCQA 70.0. No blood or
+peripheral-smear microscopy results are reported, so there is no published
+figure to check the BloodMNIST arms against.
+
+### Actions
+
+1. The modality list used in project notes corrected to the 1.5 list.
+2. The brightfield overlap is added to the reported limitations as a named
+   threat to validity.
+3. Citation corrected to arXiv:2604.05081. The earlier report is retained
+   only as lineage, labeled as the MedGemma 4B and 27B release.
+4. `HYPOTHESES.md` is **not** edited. It is frozen, its claim is true as
+   written, and this entry is the correction of record.
+
+### Related citation errors found in the same review
+
+- **arXiv:2507.05201 cited for MedGemma 1.5.** Wrong report. Corrected.
+- **MILM attributed to "Wu, Y."** Fabricated. The name was carried over from
+  the GNMT length-normalization reference. The MILM author list must be read
+  from arXiv:2605.13711 before publication. Nothing should be published with
+  an invented author.
+- **arXiv:2604.23801 understated.** It is direct prior work: Gemma 3 4B
+  against MedGemma 4B on MedQA-USMLE, finding +6.8 points from domain
+  fine-tuning. That is Q2 in text-only form and must be cited as such, with
+  this study's three differences named (vision rather than text, matched
+  LoRA budget rather than quantized off-the-shelf inference, and the
+  modality-inside versus modality-outside contrast, which they do not run).
+- **MedMNIST at size=224 comes from MedMNIST+**, a separate Zenodo release,
+  not the 2023 *Scientific Data* v2 paper. Both are cited.
+
+Full verification record in `REFERENCES.md`.
