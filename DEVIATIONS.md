@@ -820,9 +820,10 @@ figure to check the BloodMNIST arms against.
 
 - **arXiv:2507.05201 cited for MedGemma 1.5.** Wrong report. Corrected.
 - **MILM attributed to "Wu, Y."** Fabricated. The name was carried over from
-  the GNMT length-normalization reference. The MILM author list must be read
-  from arXiv:2605.13711 before publication. Nothing should be published with
-  an invented author.
+  the GNMT length-normalization reference. Corrected on 2026-07-27 by
+  reading the source: Chung, H.-H., Li, S., Wald, Y., Han, X., Saria, S.,
+  Ghosh, J., arXiv:2605.13711v1, 13 May 2026. Nothing in this project should
+  cite an author name that has not been read from the source.
 - **arXiv:2604.23801 understated.** It is direct prior work: Gemma 3 4B
   against MedGemma 4B on MedQA-USMLE, finding +6.8 points from domain
   fine-tuning. That is Q2 in text-only form and must be cited as such, with
@@ -833,3 +834,184 @@ figure to check the BloodMNIST arms against.
   not the 2023 *Scientific Data* v2 paper. Both are cited.
 
 Full verification record in `REFERENCES.md`.
+
+---
+
+## D-015. Twelve mislabeled records in results.jsonl
+
+**Date:** 2026-07-27
+**Status:** Logging defect. No effect on any reported number.
+
+### What happened
+
+`scripts/score_arms.py` detected file type by the presence of an
+`output_text` field and, finding it, scored the file as the zero-shot arms
+A1, A2, and A2b. The fine-tuned generation files `gen_A4_*.jsonl` and
+`gen_A5_*.jsonl` also contain `output_text`.
+
+So four fine-tuned files were logged under three zero-shot arm ids each,
+producing **12 records in `results/results.jsonl` whose `arm` field does not
+match the arm recorded inside their `source_file`.**
+
+### Why no reported number is wrong
+
+Records are appended in filename order, and the true zero-shot files
+(`gen_dermamnist_test.jsonl`, `gen_bloodmnist_test.jsonl`) sort after the
+`gen_A4_*` and `gen_A5_*` files. Reading the latest record per arm therefore
+returns the correct zero-shot values, which is what was reported.
+
+The A1 zero-shot figure of 0.000 could not have come from a fine-tuned file:
+strict parsing of A4's output scores 0.617 on DermaMNIST. The independent
+independent recomputation described below confirms every reported number
+re-derives from its stated source file, with 0 mismatches.
+
+### Fix
+
+`score_arms.py` now reads the `arm` field from the file it is scoring and
+uses it when present, falling back to A1/A2/A2b only for files that carry no
+arm id. The four files were rescored, adding correctly labeled records for
+A4, A4-lenient, A4-extract, A5, A5-lenient, and A5-extract.
+
+The 12 incorrect records remain. `results.jsonl` is append-only under hard
+rule 5, and deleting them would be a worse precedent than leaving a
+documented defect in place.
+
+### Rule for reading results.jsonl
+
+**Filter on `source_file`, not on `arm` alone.** A record's `source_file`
+field is authoritative about which raw file produced it. Reading by `arm`
+alone will return a fine-tuned model's score under a zero-shot arm label,
+and specifically will suggest that zero-shot strict parsing scored 0.947 on
+BloodMNIST when the true value is 0.000.
+
+The correct read is the latest record for each `(arm, source_file)` pair.
+The zero-shot arms come from `gen_{dataset}_{split}.jsonl`; the fine-tuned
+arms come from `gen_A4_*` and `gen_A5_*`.
+
+### How this was caught
+
+An audit script written after the test pass recomputed every logged
+macro-F1 from its stated `source_file` and separately compared each record's
+`arm` field against the arm recorded inside that file. The recomputation
+passed on all ten arm-dataset pairs with zero mismatches, which establishes
+that no reported number is affected. The label comparison failed on 12
+records, which is this entry.
+
+That script is not committed. Its findings are, here.
+
+---
+
+## D-016. Q1 answered on the test split: format versus learned capability
+
+**Date:** 2026-07-27
+**Status:** Preregistered result. Test split, single evaluation.
+
+All three parsers return **identical** macro-F1 to four decimal places on the
+fine-tuned arms, on both datasets:
+
+| Arm | DermaMNIST | BloodMNIST |
+|---|---|---|
+| A4 strict | 0.6165 [0.5726, 0.6572] | 0.9469 [0.9391, 0.9548] |
+| A4 lenient | 0.6165 | 0.9469 |
+| A4 extraction | 0.6165 | 0.9469 |
+| A5 strict | 0.4220 [0.3918, 0.4513] | 0.9346 [0.9257, 0.9437] |
+| A5 lenient | 0.4220 | 0.9346 |
+| A5 extraction | 0.4220 | 0.9346 |
+
+Zero-shot MedGemma produced a bare canonical label **zero times in 2,715
+attempts**. After fine-tuning on bare labels, strict parsing, the method that
+scored 0.000, matches the most permissive parser exactly. The format penalty
+is eliminated, not reduced.
+
+### Decomposition
+
+| | DermaMNIST | BloodMNIST |
+|---|---|---|
+| A1 strict, zero-shot | 0.000 | 0.000 |
+| A3 constrained, format removed | 0.197 | 0.036 |
+| A4 fine-tuned | 0.617 | 0.947 |
+| Format component (A1 to A3) | +0.197 (32%) | +0.036 (4%) |
+| Learned component (A3 to A4) | +0.420 (68%) | +0.911 (96%) |
+
+**Wording that matters.** A3 to A4 is what fine-tuning added beyond format
+handling. It bundles medical discrimination with general task adaptation, and
+this design cannot separate them. It is the *learned* component, not the
+*medical* component. Calling it medical would overclaim, since A5 gained
+substantially on the same axis without medical pretraining.
+
+On DermaMNIST roughly a third of the apparent zero-shot-to-fine-tuned jump
+was the measurement rather than the model. On BloodMNIST almost none of it
+was, because there was no latent capability for better parsing to reveal.
+
+---
+
+## D-017. Corrections from an independent review of the repository
+
+**Date:** 2026-07-27
+**Status:** Corrections to the README. No result changes.
+
+An independent review of the published repository found seven errors in the
+README. Six were real and are corrected. One was not.
+
+### Corrected
+
+**1. Compute figure was roughly double the logged value.** The README stated
+"roughly 12 GPU-hours, about $24." Summing `gpu_seconds` across every logged
+run gives **8.76 GPU-hours and $9.48** at the $1.082 hourly rate. The larger
+figure was an estimate of total instance billing, which includes idle time,
+model loading, and three training runs killed by instance shutdowns, and it
+should not have been presented as compute. Now states the logged figure and
+says explicitly what it excludes.
+
+**2. Attempt count belonged to the wrong split.** The claim "zero times in
+2,715 attempts" appeared inside a paragraph reporting test-split results.
+2,715 is the validation total (1,003 + 1,712); test is 5,426 (2,005 +
+3,421). The underlying claim holds on both splits, since strict parsing
+scores 100 percent unparseable everywhere, so only the number was wrong.
+
+**3. Preregistration timestamp was five minutes early.** Both `HYPOTHESES.md`
+and the README recorded the freeze as 02:23 UTC. That was commit `b2efe04`,
+which was amended to correct an author identity. The commit that exists,
+`41a958a`, is timestamped **02:28:40 UTC**. The README now carries the
+correct time and a note naming `8f5e151`, the single later commit touching
+`HYPOTHESES.md`, which replaced a placeholder on the `Date registered:` line
+and changed nothing substantive.
+
+`HYPOTHESES.md` itself is not edited; it is frozen and this entry is the
+correction of record.
+
+**4. Figure caption overclaimed.** `figures/fig1_arms_*.png` shows A1, A3,
+A4, A5, and A6, with a footer reading "All arms shown." The A3 robustness
+variants are absent. The README no longer claims every arm appears, and
+states where the omitted variants can be found.
+
+**5. `score_arms.py` was missing from the reproduction instructions.** It is
+the only script producing the A1, A2, and A2b rows, so following the README
+end to end would not have reproduced three arms of the results table.
+
+**6. Deviation count was wrong.** The README said 16 entries against 14
+present. Now 17.
+
+### Not corrected, because the review was mistaken
+
+The review stated that arXiv:2509.18015 contains no Gemma 3 control and that
+the README mischaracterized it. The review was working from the abstract.
+
+Section 4.5 of that paper, titled "Comparing MedGemma to Gemma," evaluates
+Gemma 3 27B against MedGemma 27B and reports zero-shot average hit rates of
+17.6 versus 17.7 percent, CoT 25.0 versus 22.5, and few-shot 32.0 versus
+25.5. The README description is accurate and stands.
+
+**This strengthens rather than weakens the present study.** That paper found
+no MedGemma advantage zero-shot on chest radiograph localization. This study
+finds a substantial advantage after matched LoRA fine-tuning on
+dermatoscopic images, and none to speak of on blood microscopy. Domain
+advantage appearing under some conditions and not others is the shape H3
+predicts.
+
+### Method note
+
+Verifying a criticism before acting on it belongs in the same category as
+verifying a result. Five of seven items here were caught by someone reading
+more carefully than the author; one would have introduced an error if
+accepted uncritically.

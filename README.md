@@ -20,8 +20,9 @@ tracks what the encoder was trained on.
 A second finding concerns how such models are usually measured. Evaluated
 zero-shot with strict parsing, the method used in widely circulated
 tutorials, MedGemma scores **0.000 on both datasets**. It produced a bare
-canonical label **zero times in 2,715 attempts**, always wrapping the answer
-in prose. Removing that measurement artifact recovers 0.197 on DermaMNIST,
+canonical label **zero times in 5,426 test images**, always wrapping the
+answer in prose. The rate is 100 percent on validation as well, 2,715 of
+2,715. Removing that measurement artifact recovers 0.197 on DermaMNIST,
 about a third of the apparent gain from fine-tuning.
 
 The third finding is the least comfortable. A **ResNet-18 with 11.2M
@@ -29,9 +30,14 @@ parameters**, trained for three minutes, beats both 4B models on **both**
 datasets, by 13.0 and 4.0 points, at **387x fewer parameters**.
 
 **Preregistration:** [`HYPOTHESES.md`](HYPOTHESES.md), frozen at commit
-`41a958a`, 2026-07-25 02:23 UTC, before any model produced a prediction.
-Everything after that is in [`DEVIATIONS.md`](DEVIATIONS.md), append only,
-including four corrections to my own earlier claims.
+`41a958a`, **2026-07-25 02:28:40 UTC**, before any model produced a
+prediction. Everything after that is in [`DEVIATIONS.md`](DEVIATIONS.md),
+append only, including corrections to my own earlier claims.
+
+One commit touched `HYPOTHESES.md` after the freeze: `8f5e151` replaced the
+placeholder on the `Date registered:` line with the commit's actual
+timestamp. No hypothesis, threshold, metric, or analysis rule was changed.
+`git log -p -- HYPOTHESES.md` shows the full history in two commits.
 
 ---
 
@@ -133,8 +139,17 @@ beats it on at least one.*
 | DermaMNIST | **+0.130** | [+0.075, +0.181] |
 | BloodMNIST | **+0.040** | [+0.033, +0.048] |
 
-ResNet-18 beat the better 4B arm on **both** datasets, not one. Three minutes
-of training against 38, and 387x fewer parameters.
+ResNet-18 beat the better 4B arm on **both** datasets, not one. Three
+minutes of training against 38, and 387x fewer parameters.
+
+**A tension in the registered wording worth naming.** The prediction had two
+clauses: within 5 points on both datasets, and ahead on at least one. ResNet
+beat A4 by 13.0 points on DermaMNIST, which is not within 5 points of it. The
+"within 5" clause was written on the assumption that ResNet would *trail*,
+and it is inapplicable in the direction the result actually went. H4 holds
+under its registered falsification condition, which is that ResNet trails the
+better 4B model by more than 5 points on both datasets. It does not trail at
+all.
 
 ---
 
@@ -179,7 +194,7 @@ datasets."
 
 If that were the whole story, the failure should be milder on images. It is
 not. This study measures **100 percent unparseable on image classification**,
-the task type that explanation favours. Their response was to switch models;
+5,426 of 5,426 test images, the task type that explanation favours. Their response was to switch models;
 this one changes the measurement.
 
 **What appears to be new is H3.** Prior work compares MedGemma to Gemma
@@ -247,8 +262,11 @@ headline and mean described as an alternative also considered. No reader
 could have detected the substitution.
 
 **Figure axes and arm inclusion were committed before the test numbers
-existed** (commit `d3c9df1`). Y-axes start at zero, every arm appears, every
-bar carries its interval.
+existed** (commit `d3c9df1`). Y-axes start at zero, no arm is dropped for
+underperforming, and every bar carries its interval. The A3 robustness
+variants (`A3-sum`, `A3-pmi`) appear in the results table and in
+`results/results.jsonl` rather than in the figure, which shows the
+preregistered arms.
 
 **The generation token cap was measured, not guessed.** A 50-image pilot
 found output up to 433 tokens. A cap set by intuition would have truncated
@@ -286,7 +304,11 @@ differences use a paired bootstrap on the same resampled indices. H3 uses an
 independent-sample bootstrap of the difference of differences. A difference
 is treated as real when its interval excludes zero.
 
-**Compute.** One NVIDIA L4, roughly 12 GPU-hours, about $24.
+**Compute.** One NVIDIA L4. Summing `gpu_seconds` across every logged run
+gives **8.76 GPU-hours, about $9.48** at the $1.082 hourly on-demand rate.
+Total instance billing was higher, since that figure counts only compute
+inside instrumented runs and excludes model loading, idle time, and three
+training runs killed mid-execution by instance shutdowns.
 
 ---
 
@@ -305,6 +327,10 @@ python scripts/score_labels.py  --dataset dermamnist --split test --n 0 --tag A3
 python scripts/train_lora.py    --arm A4 --dataset dermamnist
 python scripts/eval_adapter.py  --arm A4 --dataset dermamnist --split test --n 0 --tag gen
 python scripts/train_resnet.py  --dataset dermamnist
+
+# scoring: turns raw output into metrics with bootstrap intervals,
+# and is what produces the A1, A2, and A2b rows
+for f in results/raw/*_test.jsonl; do python scripts/score_arms.py "$f"; done
 
 python scripts/test_hypotheses.py --split test
 python scripts/make_figures.py    --split test
@@ -326,7 +352,7 @@ cost time, are in [`SETUP.md`](SETUP.md). References are in
 
 ```
 HYPOTHESES.md    preregistration, frozen at 41a958a
-DEVIATIONS.md    16 entries, append only, including 4 self-corrections
+DEVIATIONS.md    17 entries, append only, including 6 self-corrections
 SETUP.md         verified environment and pinned revisions
 REFERENCES.md    verified citations
 subsamples/      frozen training indices with SHA-256
