@@ -294,7 +294,7 @@ def main() -> int:
     append_result({
         "arm": "A6",
         "phase": 6,
-        "stage": "train_and_eval",
+        "stage": "eval" if args.eval_only else "train_and_eval",
         "model": "resnet18",
         "revision": "torchvision IMAGENET1K_V1",
         "dataset": args.dataset,
@@ -305,7 +305,9 @@ def main() -> int:
         "hyperparameters": HP,
         "total_params": total_params,
         "trainable_params": total_params,
-        "final_train_loss": history[-1]["train_loss"],
+        # Empty in eval-only mode, where no epoch ran.
+        "final_train_loss": (history[-1]["train_loss"]
+                             if history else None),
         "final_eval_loss": final_eval_loss,
         "history": history,
         "gpu_seconds": round(elapsed, 1),
